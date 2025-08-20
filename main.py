@@ -2,7 +2,7 @@
 main.py
 
 Функции:
- - convert  : конвертирует YOLO .txt -> COCO JSON (instances_train.json)
+ - convert  : конвертирует YOLO .txt -> COCO JSON (instances_train2017.json)
  - create-empty : создаёт пустой COCO (images + пустые annotations) (для отладки)
  - infer    : запускает real-time инференс DETR (Hugging Face) с ArUco калибровкой mm/px
 
@@ -31,13 +31,13 @@ from torch.optim import AdamW
 #  Настройки (измените под себя)
 # ---------------------------
 DATASET_ROOT = "dataset"
-IMAGES_TRAIN = os.path.join(DATASET_ROOT, "images", "train")
-IMAGES_VAL = os.path.join(DATASET_ROOT, "images", "val")
+IMAGES_TRAIN = os.path.join(DATASET_ROOT, "annotations", "train2017")
+IMAGES_VAL = os.path.join(DATASET_ROOT, "annotations", "val2017")
 LABELS_TRAIN = os.path.join(DATASET_ROOT, "labels", "train")
 LABELS_VAL = os.path.join(DATASET_ROOT, "labels", "val")
-ANNOTATIONS_DIR = os.path.join(DATASET_ROOT, "annotations")
-TRAIN_JSON = os.path.join(ANNOTATIONS_DIR, "instances_train.json")
-VAL_JSON = os.path.join(ANNOTATIONS_DIR, "instances_val.json")
+ANNOTATIONS_DIR = os.path.join(DATASET_ROOT, "annotations", "annotations")
+TRAIN_JSON = os.path.join(ANNOTATIONS_DIR, "instances_train2017.json")
+VAL_JSON = os.path.join(ANNOTATIONS_DIR, "instances_val2017.json")
 CLASSES_PATH = "classes.txt"  # если есть
 
 ARUCO_MARKER_MM = 100.0  # физический размер маркера (мм), измерьте и пропишите правильное значение
