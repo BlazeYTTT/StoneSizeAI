@@ -1,0 +1,2 @@
+# StoneSizeAI
+Machine vision
