@@ -1,147 +1,269 @@
-# gui_infer.py
-import cv2
+"""
+main.py
+
+Функции:
+ - convert  : конвертирует YOLO .txt -> COCO JSON (instances_train.json)
+ - create-empty : создаёт пустой COCO (images + пустые annotations) (для отладки)
+ - infer    : запускает real-time инференс DETR (Hugging Face) с ArUco калибровкой mm/px
+
+Пример запуска:
+ python main.py convert
+ python main.py create-empty
+ python main.py infer --model facebook/detr-resnet-50 --video 0 --calib calib/calib_aruco.jpg
+
+Примечание: Для тренировки DETR рекомендую использовать Hugging Face Cookbook / ноутбук (см. README в проекте).
+"""
+
+import os
+import json
+import argparse
 import time
-import threading
+from PIL import Image
 import numpy as np
-import tkinter as tk
-from tkinter import messagebox
-from PIL import Image, ImageTk
+import cv2
+import torch
 
-# Ultralytics
-from ultralytics import YOLO
+# Transformers imports
+from transformers import DetrImageProcessor, DetrForObjectDetection, get_linear_schedule_with_warmup
+from torch.optim import AdamW
 
-# ------------------ Настройки (адаптируйте) ------------------
-VIDEO_SRC = 0  # USB камера index
-MODEL_WEIGHTS = "runs/detect/train/weights/best.pt"  # замените, если нужно
-FALLBACK_MODEL = "yolov8n.pt"  # для теста, если у вас нет обученных весов
-PIXELS_PER_MM = 5.0  # <- Замените на результат вашей калибровки
-SIZE_THRESHOLD_MM = 300.0
-CONF_THRESHOLD = 0.35
-FRAME_WIDTH = 1280  # можно уменьшить для скорости
-FRAME_HEIGHT = 720
-# ------------------------------------------------------------
+# ---------------------------
+#  Настройки (измените под себя)
+# ---------------------------
+DATASET_ROOT = "dataset"
+IMAGES_TRAIN = os.path.join(DATASET_ROOT, "images", "train")
+IMAGES_VAL = os.path.join(DATASET_ROOT, "images", "val")
+LABELS_TRAIN = os.path.join(DATASET_ROOT, "labels", "train")
+LABELS_VAL = os.path.join(DATASET_ROOT, "labels", "val")
+ANNOTATIONS_DIR = os.path.join(DATASET_ROOT, "annotations")
+TRAIN_JSON = os.path.join(ANNOTATIONS_DIR, "instances_train.json")
+VAL_JSON = os.path.join(ANNOTATIONS_DIR, "instances_val.json")
+CLASSES_PATH = "classes.txt"  # если есть
 
-# Состояние конвейера (эмуляция)
-conveyor_running = True
+ARUCO_MARKER_MM = 100.0  # физический размер маркера (мм), измерьте и пропишите правильное значение
+MM_THRESHOLD = 300.0     # порог в мм для oversized
+STOP_THROTTLE = 5.0      # сек между остановками (чтобы не гонять стоп постоянно)
 
-def stop_conveyor_emulation():
-    global conveyor_running
-    if conveyor_running:
-        conveyor_running = False
-        print("[EMUL] Conveyor STOPPED (flag set).")
-        # TODO: заменить эмуляцию реальной командой на ПЛК (через serial/ethernet/opcua)
+# ---------------------------
+#  Утилиты: YOLO -> COCO
+# ---------------------------
+def read_classes(classes_path):
+    if not os.path.exists(classes_path):
+        return ["rock", "foreign_object"]
+    return [x.strip() for x in open(classes_path, "r", encoding="utf-8").read().splitlines() if x.strip()]
 
-# Загрузка модели
-try:
-    model = YOLO(MODEL_WEIGHTS)
-    print(f"Loaded weights: {MODEL_WEIGHTS}")
-except Exception as e:
-    print("Failed to load custom weights, loading fallback model:", e)
-    model = YOLO(FALLBACK_MODEL)
-
-# Настройка камеры
-cap = cv2.VideoCapture(VIDEO_SRC, cv2.CAP_DSHOW)  # CAP_DSHOW полезен на Windows
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-time.sleep(0.5)  # нехитрая пауза для инициализации камеры
-
-if not cap.isOpened():
-    raise RuntimeError("Не удалось открыть камеру. Проверьте индекс и доступность устройства.")
-
-# Tkinter GUI
-root = tk.Tk()
-root.title("Ore fraction monitor")
-
-# Canvas для видео
-ret, frame = cap.read()
-if not ret:
-    raise RuntimeError("Не удалось получить кадр с камеры при старте")
-h, w = frame.shape[:2]
-canvas = tk.Canvas(root, width=w, height=h)
-canvas.pack()
-
-status_label = tk.Label(root, text="Состояние: OK", font=("Arial", 14))
-status_label.pack()
-
-# Для хранения PhotoImage чтобы не удалялся сборщиком
-imgtk_ref = None
-
-def process_frame_and_detect(frame_bgr):
+def yolo_to_coco(images_dir, labels_dir, classes_path, out_json_path):
     """
-    Выполняет предсказание на кадре и возвращает список детекций:
-    [{'class':name, 'conf':float, 'bbox':(x1,y1,x2,y2), 'size_mm':float}, ...]
+    Преобразует YOLO-разметку (txt) в COCO JSON.
+    images_dir: папка с изображениями
+    labels_dir: папка с .txt (один файл на изображение, если нет - считается, что объект не размечён)
+    classes_path: файл classes.txt
     """
-    # Ultralytics принимает BGR numpy arrays напрямую
-    # predict возвращает Results, берем первый (batch size 1)
-    res = model.predict(source=frame_bgr, conf=CONF_THRESHOLD, verbose=False, device='cpu', imgsz=640)
-    results = res[0]  # один элемент
-    detections = []
-    if hasattr(results, 'boxes') and results.boxes is not None:
-        for b in results.boxes:
-            # b.xyxy: tensor [[x1,y1,x2,y2]], b.conf, b.cls
-            xyxy = b.xyxy[0].cpu().numpy().astype(int)
-            conf = float(b.conf[0].cpu().numpy()) if hasattr(b, 'conf') else float(b.conf)
-            cls_id = int(b.cls[0].cpu().numpy()) if hasattr(b, 'cls') else int(b.cls)
-            cls_name = model.names[cls_id] if model.names else str(cls_id)
-            x1, y1, x2, y2 = xyxy.tolist()
-            px_w = x2 - x1
-            px_h = y2 - y1
-            max_px = max(px_w, px_h)
-            size_mm = max_px / PIXELS_PER_MM
-            detections.append({
-                'class': cls_name,
-                'conf': conf,
-                'bbox': (x1, y1, x2, y2),
-                'size_mm': size_mm
-            })
-    return detections
+    classes = read_classes(classes_path)
+    images = []
+    annotations = []
+    ann_id = 1
+    img_id = 1
+    os.makedirs(os.path.dirname(out_json_path), exist_ok=True)
 
-def update_loop():
-    global imgtk_ref, conveyor_running
-    ret, frame = cap.read()
-    if not ret:
-        root.after(30, update_loop)
+    for fname in sorted(os.listdir(images_dir)):
+        if not fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+            continue
+        img_path = os.path.join(images_dir, fname)
+        try:
+            w, h = Image.open(img_path).size
+        except Exception as e:
+            print("Cannot open image:", img_path, e); continue
+
+        images.append({"file_name": fname, "height": h, "width": w, "id": img_id})
+        label_file = os.path.join(labels_dir, os.path.splitext(fname)[0] + '.txt')
+        if os.path.exists(label_file):
+            for line in open(label_file, 'r', encoding='utf-8'):
+                parts = line.strip().split()
+                if len(parts) < 5:
+                    continue
+                cls = int(parts[0])
+                x_center = float(parts[1])
+                y_center = float(parts[2])
+                w_rel = float(parts[3])
+                h_rel = float(parts[4])
+                x = (x_center - w_rel/2) * w
+                y = (y_center - h_rel/2) * h
+                bw = w_rel * w
+                bh = h_rel * h
+                annotations.append({
+                    "id": ann_id,
+                    "image_id": img_id,
+                    "category_id": cls,
+                    "bbox": [x, y, bw, bh],
+                    "area": bw * bh,
+                    "iscrowd": 0
+                })
+                ann_id += 1
+        img_id += 1
+
+    categories = [{"id": i, "name": name} for i, name in enumerate(classes)]
+    coco = {"images": images, "annotations": annotations, "categories": categories}
+    with open(out_json_path, 'w', encoding='utf-8') as f:
+        json.dump(coco, f, ensure_ascii=False, indent=2)
+    print("Saved COCO annotations:", out_json_path)
+    print("Images:", len(images), "Annotations:", len(annotations), "Classes:", len(categories))
+
+
+def create_empty_coco(images_dir, out_json_path):
+    """
+    Создает COCO JSON со списком изображений, но пустыми аннотациями.
+    Удобно для отладки pipeline без реальных аннотаций.
+    """
+    os.makedirs(os.path.dirname(out_json_path), exist_ok=True)
+    images = []
+    img_id = 1
+    for fname in sorted(os.listdir(images_dir)):
+        if not fname.lower().endswith(('.jpg', '.jpeg', '.png')): continue
+        w, h = Image.open(os.path.join(images_dir, fname)).size
+        images.append({"file_name": fname, "height": h, "width": w, "id": img_id})
+        img_id += 1
+    categories = [{"id": 0, "name": "rock"}, {"id": 1, "name": "foreign_object"}]
+    coco = {"images": images, "annotations": [], "categories": categories}
+    with open(out_json_path, 'w', encoding='utf-8') as f:
+        json.dump(coco, f, ensure_ascii=False, indent=2)
+    print("Created empty COCO:", out_json_path, "images:", len(images))
+
+
+# ---------------------------
+#  ArUco calibration helper
+# ---------------------------
+def compute_mm_per_px_from_aruco(image_path, marker_mm=ARUCO_MARKER_MM, aruco_dict_type=cv2.aruco.DICT_4X4_50):
+    img = cv2.imread(image_path)
+    if img is None:
+        print("[CALIB] Cannot read", image_path); return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_type)
+    detector = cv2.aruco.ArucoDetector(aruco_dict, cv2.aruco.DetectorParameters())
+    corners, ids, _ = detector.detectMarkers(gray)
+    if ids is None or len(corners) == 0:
+        print("[CALIB] ArUco not found in calibration image.")
+        return None
+    c = corners[0][0]
+    side_lengths = [np.linalg.norm(c[i] - c[(i+1) % 4]) for i in range(4)]
+    avg_px = float(np.mean(side_lengths))
+    mm_per_px = marker_mm / avg_px
+    print(f"[CALIB] avg_px={avg_px:.2f} -> mm_per_px={mm_per_px:.6f}")
+    return mm_per_px
+
+# ---------------------------
+#  Inference (DETR)
+# ---------------------------
+def run_inference(model_name_or_path, video_source=0, calib_image=None, conf_thr=0.5):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("[INFO] Loading model:", model_name_or_path, "device:", device)
+    processor = DetrImageProcessor.from_pretrained(model_name_or_path)
+    model = DetrForObjectDetection.from_pretrained(model_name_or_path).to(device)
+    model.eval()
+
+    mm_per_px = None
+    if calib_image and os.path.exists(calib_image):
+        mm_per_px = compute_mm_per_px_from_aruco(calib_image)
+    if mm_per_px is None:
+        # попросим вручную
+        try:
+            mm_per_px = float(input("[INPUT] Введите mm_per_px вручную (например 0.5): "))
+        except Exception:
+            mm_per_px = None
+            print("[WARN] mm_per_px не установлен. Оценка физических размеров будет недоступна.")
+
+    cap = cv2.VideoCapture(video_source)
+    if not cap.isOpened():
+        print("[ERROR] Не удалось открыть видео-источник:", video_source)
         return
 
-    # детекция (можно вынести в отдельный thread, но тогда нужно безопасно передавать данные в GUI)
-    detections = process_frame_and_detect(frame)
+    last_alert = 0.0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("[INFO] Конец потока / нет кадра"); break
 
-    alarm = False
-    for d in detections:
-        x1,y1,x2,y2 = d['bbox']
-        label = f"{d['class']} {d['conf']:.2f} {d['size_mm']:.0f}mm"
-        # цвет по умолчанию — зелёный
-        color = (0,255,0)
-        thickness = 2
-        if d['class'] == 'foreign' or d['size_mm'] > SIZE_THRESHOLD_MM:
-            alarm = True
-            color = (0,0,255)
-            thickness = 3
-        # рисуем bbox и подпись (на RGB картинке)
-        cv2.rectangle(frame, (x1,y1), (x2,y2), color, thickness)
-        cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        inputs = processor(images=frame, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
 
-    if alarm and conveyor_running:
-        stop_conveyor_emulation()
+        target_sizes = torch.tensor([frame.shape[:2]], device=device)
+        results = processor.post_process(outputs, target_sizes=target_sizes)[0]
 
-    # Отобразить статус
-    if not conveyor_running:
-        status_label.config(text="Состояние: КОНВЕЙЕР ОСТАНОВЛЕН", fg="red")
-    elif alarm:
-        status_label.config(text="Состояние: ТРЕВОГА", fg="orange")
+        annotated = frame.copy()
+        for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
+            score = float(score)
+            if score < conf_thr:
+                continue
+            x1, y1, x2, y2 = map(int, box.tolist())
+            w_px = x2 - x1
+            h_px = y2 - y1
+            size_mm = None
+            if mm_per_px is not None:
+                size_mm = max(w_px, h_px) * mm_per_px
+            cls_name = model.config.id2label[int(label)] if int(label) in model.config.id2label else str(int(label))
+            color = (0, 255, 0)
+            if cls_name == "foreign_object" or (size_mm is not None and size_mm > MM_THRESHOLD):
+                color = (0, 0, 255)
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            text = f"{cls_name} {score:.2f}"
+            if size_mm is not None:
+                text += f" {int(size_mm)}mm"
+            cv2.putText(annotated, text, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            if (cls_name == "foreign_object" or (size_mm is not None and size_mm > MM_THRESHOLD)) and (time.time() - last_alert > STOP_THROTTLE):
+                print(f"[ALERT] {cls_name} detected, size={size_mm}, score={score:.2f}")
+                print("[ACTION] Emulating conveyor STOP (replace with serial/modbus call)")
+                last_alert = time.time()
+
+        cv2.imshow("Conveyor Monitor", annotated)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('s'):
+            print("[MANUAL] Manual stop requested.")
+            print("[ACTION] Emulating conveyor STOP")
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+# ---------------------------
+#  CLI
+# ---------------------------
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd", help="sub-command")
+
+    p_conv = sub.add_parser("convert", help="Convert YOLO -> COCO for train and val")
+    p_conv.add_argument("--images", default=IMAGES_TRAIN, help="images dir")
+    p_conv.add_argument("--labels", default=LABELS_TRAIN, help="labels dir")
+    p_conv.add_argument("--out", default=TRAIN_JSON, help="out coco json")
+    p_conv.add_argument("--classes", default=CLASSES_PATH, help="classes.txt")
+
+    p_empty = sub.add_parser("create-empty", help="create empty COCO with images listed")
+    p_empty.add_argument("--images", default=IMAGES_TRAIN)
+    p_empty.add_argument("--out", default=TRAIN_JSON)
+
+    p_inf = sub.add_parser("infer", help="Run realtime inference (DETR)")
+    p_inf.add_argument("--model", required=True, help="model name or path (e.g. facebook/detr-resnet-50 or path to checkpoint)")
+    p_inf.add_argument("--video", default=0, help="video source: 0 or path or rtsp")
+    p_inf.add_argument("--calib", default=os.path.join("calib", "calib_aruco.jpg"), help="calibration image with ArUco marker")
+    p_inf.add_argument("--conf", default=0.5, type=float, help="confidence threshold")
+
+    args = parser.parse_args()
+
+    if args.cmd == "convert":
+        print("Converting YOLO -> COCO")
+        yolo_to_coco(args.images, args.labels, args.classes, args.out)
+    elif args.cmd == "create-empty":
+        print("Create empty COCO")
+        create_empty_coco(args.images, args.out)
+    elif args.cmd == "infer":
+        run_inference(args.model, args.video, args.calib, args.conf)
     else:
-        status_label.config(text="Состояние: OK", fg="green")
+        parser.print_help()
 
-    # Конвертация BGR->RGB и отображение в Tkinter
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    img = Image.fromarray(rgb)
-    imgtk = ImageTk.PhotoImage(image=img)
-    imgtk_ref = imgtk  # сохранить референс
-    canvas.create_image(0, 0, anchor=tk.NW, image=imgtk)
 
-    root.after(30, update_loop)
-
-# Запуск цикла
-root.after(0, update_loop)
-root.protocol("WM_DELETE_WINDOW", lambda: (cap.release(), root.destroy()))
-root.mainloop()
+if __name__ == "__main__":
+    main()
