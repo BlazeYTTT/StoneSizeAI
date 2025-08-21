@@ -15,25 +15,39 @@
   ],
   "images": [
     {
-      "id": 2,
       "file_name": "0001.png",
-      "height": 2250,
-      "width": 3000
+      "height": 480,
+      "width": 640,
+      "id": 1
     }
   ],
   "annotations": [
     {
-      "id": 2,
-      "image_id": 2,
-      "category_id": 1,
-      "bbox": [1200.0, 1125.0, 300.0, 225.0],
-      "area": 67500.0,
+      "id": 1,
+      "image_id": 1,
+      "category_id": 0,
+      "bbox": [
+        256.0,
+        240.0,
+        64.0,
+        48.0
+      ],
+      "area": 3072.0,
       "iscrowd": 0
     }
   ],
   "categories": [
-    {"id": 1, "name": "rock"},
-    {"id": 2, "name": "big_rock"},
-    {"id": 3, "name": "foreign_object"}
+    {
+      "id": 1,
+      "name": "rock"
+    },
+    {
+      "id": 2,
+      "name": "big_rock"
+    },
+    {
+      "id": 3,
+      "name": "foreign_object"
+    }
   ]
 }

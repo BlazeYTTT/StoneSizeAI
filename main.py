@@ -31,11 +31,11 @@ from torch.optim import AdamW
 #  Настройки (измените под себя)
 # ---------------------------
 DATASET_ROOT = "dataset"
-IMAGES_TRAIN = os.path.join(DATASET_ROOT, "annotations", "train2017")
-IMAGES_VAL = os.path.join(DATASET_ROOT, "annotations", "val2017")
+IMAGES_TRAIN = os.path.join(DATASET_ROOT, "train2017")
+IMAGES_VAL = os.path.join(DATASET_ROOT, "val2017")
 LABELS_TRAIN = os.path.join(DATASET_ROOT, "labels", "train")
 LABELS_VAL = os.path.join(DATASET_ROOT, "labels", "val")
-ANNOTATIONS_DIR = os.path.join(DATASET_ROOT, "annotations", "annotations")
+ANNOTATIONS_DIR = os.path.join(DATASET_ROOT, "annotations")
 TRAIN_JSON = os.path.join(ANNOTATIONS_DIR, "instances_train2017.json")
 VAL_JSON = os.path.join(ANNOTATIONS_DIR, "instances_val2017.json")
 CLASSES_PATH = "classes.txt"  # если есть
@@ -51,6 +51,27 @@ def read_classes(classes_path):
     if not os.path.exists(classes_path):
         return ["rock", "foreign_object"]
     return [x.strip() for x in open(classes_path, "r", encoding="utf-8").read().splitlines() if x.strip()]
+
+
+# ... (остальной код без изменений)
+
+# Добавим константы для info и licenses
+COCO_INFO = {
+    "year": 2023,
+    "version": "1.0",
+    "description": "Stone Size Dataset",
+    "contributor": "Your Name",
+    "date_created": "2023-01-01"
+}
+
+COCO_LICENSES = [
+    {
+        "id": 1,
+        "name": "CC BY-NC-SA 2.0",
+        "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
+    }
+]
+
 
 def yolo_to_coco(images_dir, labels_dir, classes_path, out_json_path):
     """
@@ -73,7 +94,8 @@ def yolo_to_coco(images_dir, labels_dir, classes_path, out_json_path):
         try:
             w, h = Image.open(img_path).size
         except Exception as e:
-            print("Cannot open image:", img_path, e); continue
+            print("Cannot open image:", img_path, e);
+            continue
 
         images.append({"file_name": fname, "height": h, "width": w, "id": img_id})
         label_file = os.path.join(labels_dir, os.path.splitext(fname)[0] + '.txt')
@@ -87,8 +109,8 @@ def yolo_to_coco(images_dir, labels_dir, classes_path, out_json_path):
                 y_center = float(parts[2])
                 w_rel = float(parts[3])
                 h_rel = float(parts[4])
-                x = (x_center - w_rel/2) * w
-                y = (y_center - h_rel/2) * h
+                x = (x_center - w_rel / 2) * w
+                y = (y_center - h_rel / 2) * h
                 bw = w_rel * w
                 bh = h_rel * h
                 annotations.append({
@@ -102,8 +124,17 @@ def yolo_to_coco(images_dir, labels_dir, classes_path, out_json_path):
                 ann_id += 1
         img_id += 1
 
-    categories = [{"id": i, "name": name} for i, name in enumerate(classes)]
-    coco = {"images": images, "annotations": annotations, "categories": categories}
+    categories = [{"id": i+1, "name": name} for i, name in enumerate(classes)]
+
+    # Добавляем info и licenses в COCO JSON
+    coco = {
+        "info": COCO_INFO,
+        "licenses": COCO_LICENSES,
+        "images": images,
+        "annotations": annotations,
+        "categories": categories
+    }
+
     with open(out_json_path, 'w', encoding='utf-8') as f:
         json.dump(coco, f, ensure_ascii=False, indent=2)
     print("Saved COCO annotations:", out_json_path)
@@ -124,10 +155,22 @@ def create_empty_coco(images_dir, out_json_path):
         images.append({"file_name": fname, "height": h, "width": w, "id": img_id})
         img_id += 1
     categories = [{"id": 0, "name": "rock"}, {"id": 1, "name": "foreign_object"}]
-    coco = {"images": images, "annotations": [], "categories": categories}
+
+    # Добавляем info и licenses в COCO JSON
+    coco = {
+        "info": COCO_INFO,
+        "licenses": COCO_LICENSES,
+        "images": images,
+        "annotations": [],
+        "categories": categories
+    }
+
     with open(out_json_path, 'w', encoding='utf-8') as f:
         json.dump(coco, f, ensure_ascii=False, indent=2)
     print("Created empty COCO:", out_json_path, "images:", len(images))
+
+
+# ... (остальной код без изменений)
 
 
 # ---------------------------
@@ -236,9 +279,12 @@ def main():
     sub = parser.add_subparsers(dest="cmd", help="sub-command")
 
     p_conv = sub.add_parser("convert", help="Convert YOLO -> COCO for train and val")
-    p_conv.add_argument("--images", default=IMAGES_TRAIN, help="images dir")
-    p_conv.add_argument("--labels", default=LABELS_TRAIN, help="labels dir")
-    p_conv.add_argument("--out", default=TRAIN_JSON, help="out coco json")
+    p_conv.add_argument("--train_images", default=IMAGES_TRAIN, help="train images dir")
+    p_conv.add_argument("--train_labels", default=LABELS_TRAIN, help="train labels dir")
+    p_conv.add_argument("--val_images", default=IMAGES_VAL, help="val images dir")
+    p_conv.add_argument("--val_labels", default=LABELS_VAL, help="val labels dir")
+    p_conv.add_argument("--train_out", default=TRAIN_JSON, help="out coco json for train")
+    p_conv.add_argument("--val_out", default=VAL_JSON, help="out coco json for val")
     p_conv.add_argument("--classes", default=CLASSES_PATH, help="classes.txt")
 
     p_empty = sub.add_parser("create-empty", help="create empty COCO with images listed")
@@ -254,8 +300,10 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "convert":
-        print("Converting YOLO -> COCO")
-        yolo_to_coco(args.images, args.labels, args.classes, args.out)
+        print("Converting YOLO -> COCO for train")
+        yolo_to_coco(args.train_images, args.train_labels, args.classes, args.train_out)
+        print("Converting YOLO -> COCO for val")
+        yolo_to_coco(args.val_images, args.val_labels, args.classes, args.val_out)
     elif args.cmd == "create-empty":
         print("Create empty COCO")
         create_empty_coco(args.images, args.out)
