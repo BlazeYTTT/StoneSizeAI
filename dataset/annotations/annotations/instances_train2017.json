@@ -1,21 +1,25 @@
 {
   "info": {
-    "year": "2023",
+    "year": 2023,
     "version": "1.0",
     "description": "Stone Size Dataset",
     "contributor": "Your Name",
-    "url": "http://your.url",
     "date_created": "2023-01-01"
   },
   "licenses": [
     {
       "id": 1,
-      "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/",
-      "name": "CC BY-NC-SA 2.0"
+      "name": "CC BY-NC-SA 2.0",
+      "url": "http://creativecommons.org/licenses/by-nc-sa/2.0/"
     }
   ],
   "images": [
-    {"file_name": "0001.png", "height": 2250, "width": 3000, "id": 1}
+    {
+      "id": 1,
+      "file_name": "0001.png",
+      "height": 2250,
+      "width": 3000
+    }
   ],
   "annotations": [
     {
